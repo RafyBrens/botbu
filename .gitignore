@@ -10,3 +10,10 @@ npm-debug.*
 *.orig.*
 web-build/
 .env
+
+# Generated native projects (expo prebuild)
+ios/
+android/
+
+# Lock files
+package-lock.json

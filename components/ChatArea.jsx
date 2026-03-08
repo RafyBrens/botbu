@@ -10,16 +10,78 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
+import * as Speech from 'expo-speech';
 import { Ionicons } from '@expo/vector-icons';
 import Colors from '../constants/Colors';
 import Avatar from './ui/Avatar';
+import SuggestionChips from './SuggestionChips';
+import ScheduleGrid from './ScheduleGrid';
+import EventsPanel from './EventsPanel';
+import DirectionsCard from './DirectionsCard';
+import { findBuilding } from '../constants/Buildings';
 
 const colors = Colors.light;
 
-/**
- * ChatArea — displays the message list, streaming indicator, and header.
- * Ported from web ChatArea.jsx
- */
+function parseSuggestions(text) {
+  const match = text.match(/\[SUGGESTIONS:\s*"([^"]+)"\s*\|\s*"([^"]+)"\s*\|\s*"([^"]+)"\s*\]/);
+  if (!match) return { cleanText: text, suggestions: [] };
+  const cleanText = text.replace(/\[SUGGESTIONS:.*?\]/, '').trim();
+  return { cleanText, suggestions: [match[1], match[2], match[3]] };
+}
+
+function parseScheduleData(text) {
+  const match = text.match(/\[SCHEDULE_DATA\]([\s\S]*?)\[\/SCHEDULE_DATA\]/);
+  if (!match) return { cleanText: text, scheduleData: null };
+  try {
+    const data = JSON.parse(match[1]);
+    const cleanText = text.replace(/\[SCHEDULE_DATA\][\s\S]*?\[\/SCHEDULE_DATA\]/, '').trim();
+    return { cleanText, scheduleData: data };
+  } catch {
+    return { cleanText: text, scheduleData: null };
+  }
+}
+
+function parseEventsData(text) {
+  const match = text.match(/\[EVENTS_DATA\]([\s\S]*?)\[\/EVENTS_DATA\]/);
+  if (!match) return { cleanText: text, eventsData: null };
+  try {
+    const data = JSON.parse(match[1]);
+    const cleanText = text.replace(/\[EVENTS_DATA\][\s\S]*?\[\/EVENTS_DATA\]/, '').trim();
+    return { cleanText, eventsData: data };
+  } catch {
+    return { cleanText: text, eventsData: null };
+  }
+}
+
+function parseNavigate(text) {
+  const match = text.match(/\[NAVIGATE:([^\]]+)\]/);
+  if (!match) return { cleanText: text, navigateBuilding: null };
+  const buildingName = match[1].trim();
+  const building = findBuilding(buildingName);
+  const cleanText = text.replace(/\[NAVIGATE:[^\]]+\]/g, '').trim();
+  return { cleanText, navigateBuilding: building };
+}
+
+function stripAllTags(text) {
+  let cleaned = text;
+  cleaned = cleaned.replace(/\[SCHEDULE_DATA\][\s\S]*?\[\/SCHEDULE_DATA\]/g, '');
+  cleaned = cleaned.replace(/\[EVENTS_DATA\][\s\S]*?\[\/EVENTS_DATA\]/g, '');
+  cleaned = cleaned.replace(/\[NAVIGATE:[^\]]*\]/g, '');
+  cleaned = cleaned.replace(/\[SUGGESTIONS:.*?\]/g, '');
+  // Remove incomplete opening tags during streaming
+  cleaned = cleaned.replace(/\[SCHEDULE_DATA\][\s\S]*$/g, '');
+  cleaned = cleaned.replace(/\[EVENTS_DATA\][\s\S]*$/g, '');
+  cleaned = cleaned.replace(/\[SUGGESTIONS:[\s\S]*$/g, '');
+  cleaned = cleaned.replace(/\[NAVIGATE:[\s\S]*$/g, '');
+  return cleaned.trim();
+}
+
+function detectPendingTags(text) {
+  const hasScheduleOpen = text.includes('[SCHEDULE_DATA]') && !text.includes('[/SCHEDULE_DATA]');
+  const hasEventsOpen = text.includes('[EVENTS_DATA]') && !text.includes('[/EVENTS_DATA]');
+  return { pendingSchedule: hasScheduleOpen, pendingEvents: hasEventsOpen };
+}
+
 export default function ChatArea({
   currentChat,
   messages,
@@ -27,11 +89,13 @@ export default function ChatArea({
   streamingMessage,
   onToggleSidebar,
   onDeleteChat,
+  onSendMessage,
+  onPrefillInput,
 }) {
   const flatListRef = useRef(null);
   const [copiedMessageId, setCopiedMessageId] = useState(null);
+  const [speakingId, setSpeakingId] = useState(null);
 
-  // Bounce animation for loading dots
   const dot1 = useRef(new Animated.Value(0)).current;
   const dot2 = useRef(new Animated.Value(0)).current;
   const dot3 = useRef(new Animated.Value(0)).current;
@@ -49,19 +113,20 @@ export default function ChatArea({
       const a1 = createBounce(dot1, 0);
       const a2 = createBounce(dot2, 100);
       const a3 = createBounce(dot3, 200);
-      a1.start();
-      a2.start();
-      a3.start();
+      a1.start(); a2.start(); a3.start();
       return () => { a1.stop(); a2.stop(); a3.stop(); };
     }
   }, [isLoading, streamingMessage]);
 
-  // Scroll to bottom on new messages / streaming
   useEffect(() => {
     if (flatListRef.current && (messages.length > 0 || streamingMessage)) {
       setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
     }
   }, [messages, streamingMessage]);
+
+  useEffect(() => {
+    return () => { Speech.stop(); };
+  }, []);
 
   const handleCopy = async (content, messageId) => {
     try {
@@ -74,13 +139,45 @@ export default function ChatArea({
     }
   };
 
-  const handleDelete = () => {
-    if (currentChat) {
-      onDeleteChat(currentChat.id);
+  const handleSpeak = async (content, messageId) => {
+    if (speakingId === messageId) {
+      Speech.stop();
+      setSpeakingId(null);
+      return;
+    }
+
+    const cleaned = content
+      .replace(/\*\*/g, '')
+      .replace(/[*_~`#]/g, '')
+      .replace(/\[.*?\]\(.*?\)/g, '')
+      .replace(/\n{2,}/g, '. ')
+      .replace(/\n/g, ' ')
+      .trim()
+      .slice(0, 4000);
+
+    if (!cleaned) return;
+
+    Speech.stop();
+    setSpeakingId(messageId);
+
+    try {
+      Speech.speak(cleaned, {
+        language: 'en-US',
+        rate: 0.95,
+        pitch: 1.0,
+        onDone: () => setSpeakingId(null),
+        onStopped: () => setSpeakingId(null),
+        onError: () => setSpeakingId(null),
+      });
+    } catch {
+      setSpeakingId(null);
     }
   };
 
-  // Build data array for FlatList
+  const handleDelete = () => {
+    if (currentChat) onDeleteChat(currentChat.id);
+  };
+
   const listData = [...messages];
   if (streamingMessage) {
     listData.push({ id: '__streaming__', type: 'streaming', content: streamingMessage });
@@ -88,7 +185,7 @@ export default function ChatArea({
     listData.push({ id: '__loading__', type: 'loading' });
   }
 
-  const renderMessage = ({ item }) => {
+  const renderMessage = ({ item, index }) => {
     if (item.type === 'loading') {
       return (
         <View style={styles.botRow}>
@@ -103,14 +200,33 @@ export default function ChatArea({
     }
 
     if (item.type === 'streaming') {
+      const cleanedStream = stripAllTags(item.content);
+      const { pendingSchedule, pendingEvents } = detectPendingTags(item.content);
+
       return (
         <View style={styles.botRow}>
           <Avatar fallback="BU" size={32} style={styles.avatar} />
-          <View style={styles.botBubble}>
-            <Text style={styles.botText}>
-              {item.content}
-              <Text style={styles.cursor}>|</Text>
-            </Text>
+          <View style={{ flex: 1 }}>
+            {cleanedStream.length > 0 && (
+              <View style={styles.botBubble}>
+                <Text style={styles.botText}>
+                  {cleanedStream}
+                  {!pendingSchedule && !pendingEvents && <Text style={styles.cursor}>|</Text>}
+                </Text>
+              </View>
+            )}
+            {pendingSchedule && (
+              <View style={styles.pendingCard}>
+                <Ionicons name="calendar" size={20} color={colors.primary} />
+                <Text style={styles.pendingCardText}>Building your schedule...</Text>
+              </View>
+            )}
+            {pendingEvents && (
+              <View style={styles.pendingCard}>
+                <Ionicons name="megaphone" size={20} color={colors.primary} />
+                <Text style={styles.pendingCardText}>Loading events...</Text>
+              </View>
+            )}
           </View>
         </View>
       );
@@ -126,27 +242,87 @@ export default function ChatArea({
       );
     }
 
-    // Bot message
+    // Bot message: parse suggestions, schedule, events
+    let displayText = item.content;
+    let suggestions = [];
+    let scheduleData = null;
+    let eventsData = null;
+
+    const sugResult = parseSuggestions(displayText);
+    displayText = sugResult.cleanText;
+    suggestions = sugResult.suggestions;
+
+    const schedResult = parseScheduleData(displayText);
+    displayText = schedResult.cleanText;
+    scheduleData = schedResult.scheduleData;
+
+    const evtResult = parseEventsData(displayText);
+    displayText = evtResult.cleanText;
+    eventsData = evtResult.eventsData;
+
+    const navResult = parseNavigate(displayText);
+    displayText = navResult.cleanText;
+    const navigateBuilding = navResult.navigateBuilding;
+
+    const isLastBotMessage = index === listData.length - 1 ||
+      (index === listData.length - 2 && (listData[listData.length - 1]?.type === 'loading' || listData[listData.length - 1]?.type === 'streaming'));
+
     return (
       <View style={styles.botRow}>
         <Avatar fallback="BU" size={32} style={styles.avatar} />
         <View style={{ flex: 1 }}>
           <View style={styles.botBubble}>
-            <Text style={styles.botText}>{item.content}</Text>
+            <Text style={styles.botText}>{displayText}</Text>
           </View>
-          <TouchableOpacity
-            style={styles.copyButton}
-            onPress={() => handleCopy(item.content, item.id)}
-          >
-            <Ionicons
-              name={copiedMessageId === item.id ? 'checkmark' : 'copy-outline'}
-              size={14}
-              color={colors.textSecondary}
+
+          {scheduleData && (
+            <ScheduleGrid alternatives={scheduleData.alternatives || [scheduleData]} />
+          )}
+
+          {eventsData && (
+            <EventsPanel
+              events={eventsData}
+              onAskAbout={onPrefillInput || onSendMessage}
             />
-            <Text style={styles.copyText}>
-              {copiedMessageId === item.id ? 'Copied!' : 'Copy'}
-            </Text>
-          </TouchableOpacity>
+          )}
+
+          {navigateBuilding && (
+            <DirectionsCard building={navigateBuilding} />
+          )}
+
+          <View style={styles.actionRow}>
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={() => handleCopy(displayText, item.id)}
+            >
+              <Ionicons
+                name={copiedMessageId === item.id ? 'checkmark' : 'copy-outline'}
+                size={14}
+                color={colors.textSecondary}
+              />
+              <Text style={styles.actionText}>
+                {copiedMessageId === item.id ? 'Copied!' : 'Copy'}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={() => handleSpeak(displayText, item.id)}
+            >
+              <Ionicons
+                name={speakingId === item.id ? 'stop-circle' : 'volume-high-outline'}
+                size={14}
+                color={speakingId === item.id ? colors.primary : colors.textSecondary}
+              />
+              <Text style={[styles.actionText, speakingId === item.id && { color: colors.primary }]}>
+                {speakingId === item.id ? 'Stop' : 'Listen'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {isLastBotMessage && suggestions.length > 0 && !isLoading && (
+            <SuggestionChips suggestions={suggestions} onSelect={onPrefillInput || onSendMessage} />
+          )}
         </View>
       </View>
     );
@@ -154,7 +330,6 @@ export default function ChatArea({
 
   return (
     <View style={styles.container}>
-      {/* Header */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
           <TouchableOpacity onPress={onToggleSidebar} style={styles.menuButton}>
@@ -175,7 +350,6 @@ export default function ChatArea({
         )}
       </View>
 
-      {/* Messages */}
       <FlatList
         ref={flatListRef}
         data={listData}
@@ -194,8 +368,6 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
-
-  // Header
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -212,12 +384,8 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 10,
   },
-  menuButton: {
-    padding: 4,
-  },
-  headerTextWrap: {
-    flex: 1,
-  },
+  menuButton: { padding: 4 },
+  headerTextWrap: { flex: 1 },
   headerTitle: {
     fontSize: 16,
     fontWeight: '600',
@@ -228,18 +396,12 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginTop: 1,
   },
-  deleteButton: {
-    padding: 8,
-  },
-
-  // Messages
+  deleteButton: { padding: 8 },
   messagesList: {
     paddingHorizontal: 16,
     paddingVertical: 12,
     paddingBottom: 8,
   },
-
-  // User message
   userRow: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
@@ -257,17 +419,13 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 22,
   },
-
-  // Bot message
   botRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     marginBottom: 16,
     gap: 8,
   },
-  avatar: {
-    marginTop: 2,
-  },
+  avatar: { marginTop: 2 },
   botBubble: {
     flex: 1,
     backgroundColor: colors.botBubble,
@@ -284,23 +442,22 @@ const styles = StyleSheet.create({
     color: colors.primary,
     fontWeight: '700',
   },
-
-  // Copy button
-  copyButton: {
+  actionRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 4,
+    paddingHorizontal: 8,
+  },
+  actionButton: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    marginTop: 4,
     paddingVertical: 4,
-    paddingHorizontal: 8,
-    alignSelf: 'flex-start',
   },
-  copyText: {
+  actionText: {
     fontSize: 12,
     color: colors.textSecondary,
   },
-
-  // Loading dots
   loadingBubble: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -315,5 +472,22 @@ const styles = StyleSheet.create({
     height: 8,
     borderRadius: 4,
     backgroundColor: colors.primary,
+  },
+  pendingCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: colors.primaryBg || '#ecfdf5',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.primaryLight || '#a7f3d0',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    marginTop: 8,
+  },
+  pendingCardText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: colors.primary,
   },
 });

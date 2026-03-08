@@ -4,6 +4,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  ScrollView,
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
@@ -14,16 +15,45 @@ import Avatar from './ui/Avatar';
 
 const colors = Colors.light;
 
-/**
- * EmptyState — shown when no messages yet, with a centered input.
- * Ported from web EmptyState.jsx
- */
+const QUICK_ACTIONS = [
+  {
+    id: 'schedule',
+    icon: 'calendar',
+    label: 'Plan My Semester',
+    color: '#059669',
+    suggestion: 'Plan my Spring 2026 schedule as a Junior CS major with 15 credits',
+  },
+  {
+    id: 'events',
+    icon: 'megaphone',
+    label: "What's Happening",
+    color: '#7c3aed',
+    suggestion: 'What events are happening this week?',
+  },
+  {
+    id: 'directions',
+    icon: 'navigate',
+    label: 'Find a Building',
+    color: '#0891b2',
+    suggestion: 'How do I get to the Engineering Building?',
+  },
+  {
+    id: 'dining',
+    icon: 'restaurant',
+    label: 'Dining Hours',
+    color: '#ea580c',
+    suggestion: 'What dining halls are open right now?',
+  },
+];
+
 export default function EmptyState({
   onSendMessage,
   inputValue,
   setInputValue,
   isLoading,
   onToggleSidebar,
+  onMicPress,
+  isListening,
 }) {
   const inputRef = useRef(null);
 
@@ -40,32 +70,60 @@ export default function EmptyState({
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       keyboardVerticalOffset={0}
     >
-      {/* Hamburger */}
       <TouchableOpacity style={styles.menuButton} onPress={onToggleSidebar}>
         <Ionicons name="menu" size={22} color={colors.textSecondary} />
       </TouchableOpacity>
 
-      {/* Centered hero */}
-      <View style={styles.hero}>
-        {/* Logo */}
-        <View style={styles.logoWrapper}>
-          <Avatar fallback="BU" size={80} />
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.hero}>
+          <View style={styles.logoWrapper}>
+            <Avatar fallback="BU" size={80} />
+          </View>
+          <Text style={styles.heading}>How can I help you?</Text>
+          <Text style={styles.subtitle}>Ask me anything about Binghamton University</Text>
         </View>
 
-        <Text style={styles.heading}>How can I help you?</Text>
-        <Text style={styles.subtitle}>Ask me anything about Binghamton University</Text>
-      </View>
+        <View style={styles.quickActions}>
+          {QUICK_ACTIONS.map((action) => (
+            <TouchableOpacity
+              key={action.id}
+              style={styles.quickCard}
+              onPress={() => { setInputValue(action.suggestion); inputRef.current?.focus(); }}
+              activeOpacity={0.7}
+            >
+              <View style={[styles.quickIcon, { backgroundColor: action.color + '15' }]}>
+                <Ionicons name={action.icon} size={20} color={action.color} />
+              </View>
+              <Text style={styles.quickLabel}>{action.label}</Text>
+              <Ionicons name="arrow-forward" size={14} color={colors.textTertiary} />
+            </TouchableOpacity>
+          ))}
+        </View>
+      </ScrollView>
 
-      {/* Input box */}
       <View style={styles.inputWrapper}>
         <View style={styles.inputRow}>
+          <TouchableOpacity
+            style={[styles.micButton, isListening && styles.micButtonActive]}
+            onPress={() => { onMicPress?.(); inputRef.current?.focus(); }}
+          >
+            <Ionicons
+              name={isListening ? 'mic' : 'mic-outline'}
+              size={20}
+              color={isListening ? '#fff' : colors.textSecondary}
+            />
+          </TouchableOpacity>
           <TextInput
             ref={inputRef}
             style={styles.input}
             value={inputValue}
             onChangeText={setInputValue}
-            placeholder="Ask anything..."
-            placeholderTextColor={colors.inputPlaceholder}
+            placeholder={isListening ? 'Speak now...' : 'Ask anything...'}
+            placeholderTextColor={isListening ? colors.primary : colors.inputPlaceholder}
             multiline
             maxLength={2000}
             editable={!isLoading}
@@ -101,11 +159,16 @@ const styles = StyleSheet.create({
     zIndex: 10,
     padding: 4,
   },
-  hero: {
-    flex: 1,
-    alignItems: 'center',
+  scrollContent: {
+    flexGrow: 1,
     justifyContent: 'center',
     paddingHorizontal: 24,
+    paddingTop: 60,
+    paddingBottom: 16,
+  },
+  hero: {
+    alignItems: 'center',
+    marginBottom: 32,
   },
   logoWrapper: {
     marginBottom: 24,
@@ -122,6 +185,33 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     textAlign: 'center',
   },
+  quickActions: {
+    gap: 10,
+  },
+  quickCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    gap: 12,
+  },
+  quickIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  quickLabel: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '600',
+    color: colors.text,
+  },
   inputWrapper: {
     paddingHorizontal: 16,
     paddingBottom: Platform.OS === 'ios' ? 32 : 16,
@@ -133,10 +223,21 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.inputBorder,
     borderRadius: 16,
-    paddingLeft: 16,
+    paddingLeft: 6,
     paddingRight: 6,
     paddingVertical: 6,
     minHeight: 52,
+  },
+  micButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 4,
+  },
+  micButtonActive: {
+    backgroundColor: '#ef4444',
   },
   input: {
     flex: 1,

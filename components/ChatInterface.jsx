@@ -1,26 +1,29 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View,
+  Text,
   TextInput,
   TouchableOpacity,
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
+  Animated,
+  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { Audio } from 'expo-av';
 
 import ChatArea from './ChatArea';
 import EmptyState from './EmptyState';
 import Sidebar from './Sidebar';
+import IdleScreen from './IdleScreen';
 import Colors from '../constants/Colors';
+import { ENDPOINTS } from '../constants/Api';
 import { useChat } from '../hooks/useChat';
 
 const colors = Colors.light;
+const IDLE_TIMEOUT = 45000; // 45 seconds
 
-/**
- * ChatInterface — the main screen orchestrator.
- * Mirrors ChatGPTInterface.jsx from the web app.
- */
 export default function ChatInterface() {
   const {
     currentChat,
@@ -38,14 +41,135 @@ export default function ChatInterface() {
   } = useChat();
 
   const [sidebarVisible, setSidebarVisible] = useState(false);
+  const [idleVisible, setIdleVisible] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const idleTimer = useRef(null);
+  const inputRef = useRef(null);
+  const recordingRef = useRef(null);
+  const micPulse = useRef(new Animated.Value(1)).current;
 
-  const handleSendMessage = (content) => {
+  const resetIdleTimer = useCallback(() => {
+    setIdleVisible(false);
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+    idleTimer.current = setTimeout(() => {
+      if (messages.length === 0) {
+        setIdleVisible(true);
+      }
+    }, IDLE_TIMEOUT);
+  }, [messages.length]);
+
+  useEffect(() => {
+    resetIdleTimer();
+    return () => {
+      if (idleTimer.current) clearTimeout(idleTimer.current);
+      if (recordingRef.current) {
+        recordingRef.current.stopAndUnloadAsync().catch(() => {});
+      }
+    };
+  }, [resetIdleTimer]);
+
+  const handleSendMessage = useCallback((content) => {
+    resetIdleTimer();
     sendMessage(content);
-  };
+  }, [sendMessage, resetIdleTimer]);
 
   const handleNewChat = () => {
     startNewChat();
+    resetIdleTimer();
   };
+
+  const handleDismissIdle = () => {
+    setIdleVisible(false);
+    resetIdleTimer();
+  };
+
+  const stopRecording = useCallback(async () => {
+    micPulse.stopAnimation();
+    micPulse.setValue(1);
+
+    if (!recordingRef.current) {
+      setIsListening(false);
+      return;
+    }
+
+    setIsListening(false);
+    setIsTranscribing(true);
+
+    try {
+      await recordingRef.current.stopAndUnloadAsync();
+      const uri = recordingRef.current.getURI();
+      recordingRef.current = null;
+
+      if (!uri) {
+        setIsTranscribing(false);
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('audio', {
+        uri,
+        type: 'audio/m4a',
+        name: 'recording.m4a',
+      });
+
+      const res = await fetch(ENDPOINTS.TRANSCRIBE, {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await res.json();
+      if (data.transcript) {
+        setInputValue((prev) => (prev ? prev + ' ' + data.transcript : data.transcript));
+        inputRef.current?.focus();
+      }
+    } catch (err) {
+      console.error('Transcription failed:', err);
+      Alert.alert('Error', 'Could not transcribe audio. Please try again.');
+    } finally {
+      setIsTranscribing(false);
+    }
+  }, [micPulse, setInputValue]);
+
+  const startRecording = useCallback(async () => {
+    try {
+      const { status } = await Audio.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission required', 'Please allow microphone access to use voice input.');
+        return;
+      }
+
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+      recordingRef.current = recording;
+      setIsListening(true);
+
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(micPulse, { toValue: 1.3, duration: 600, useNativeDriver: true }),
+          Animated.timing(micPulse, { toValue: 1, duration: 600, useNativeDriver: true }),
+        ])
+      ).start();
+    } catch (err) {
+      console.error('Failed to start recording:', err);
+      Alert.alert('Error', 'Could not start recording.');
+    }
+  }, [micPulse]);
+
+  const handleMicPress = useCallback(() => {
+    resetIdleTimer();
+    if (isListening) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  }, [isListening, stopRecording, startRecording, resetIdleTimer]);
 
   if (!isReady) {
     return (
@@ -59,7 +183,8 @@ export default function ChatInterface() {
 
   return (
     <View style={styles.container}>
-      {/* Sidebar drawer */}
+      <IdleScreen visible={idleVisible && !hasMessages} onDismiss={handleDismissIdle} />
+
       <Sidebar
         visible={sidebarVisible}
         currentChat={currentChat}
@@ -71,7 +196,6 @@ export default function ChatInterface() {
       />
 
       {hasMessages ? (
-        // Chat mode
         <KeyboardAvoidingView
           style={styles.chatContainer}
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -84,17 +208,52 @@ export default function ChatInterface() {
             streamingMessage={streamingMessage}
             onToggleSidebar={() => setSidebarVisible(true)}
             onDeleteChat={handleDeleteChat}
+            onSendMessage={handleSendMessage}
+            onPrefillInput={(text) => { setInputValue(text); resetIdleTimer(); }}
           />
 
-          {/* Fixed input at bottom */}
           <View style={styles.inputContainer}>
+            {(isListening || isTranscribing) && (
+              <View style={styles.listeningBar}>
+                <Animated.View style={[styles.micPulseCircle, isTranscribing && { backgroundColor: colors.primary }, { transform: [{ scale: isListening ? micPulse : 1 }] }]}>
+                  <Ionicons name={isTranscribing ? 'hourglass' : 'mic'} size={16} color="#fff" />
+                </Animated.View>
+                <Text style={styles.listeningText}>
+                  {isTranscribing ? 'Transcribing...' : 'Listening... tap Stop when done'}
+                </Text>
+                {isListening && (
+                  <TouchableOpacity onPress={handleMicPress}>
+                    <Text style={styles.listeningStop}>Stop</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            )}
             <View style={styles.inputRow}>
+              <TouchableOpacity
+                style={[styles.micButton, isListening && styles.micButtonActive]}
+                onPress={handleMicPress}
+              >
+                <Ionicons
+                  name={isListening ? 'mic' : 'mic-outline'}
+                  size={20}
+                  color={isListening ? '#fff' : colors.textSecondary}
+                />
+              </TouchableOpacity>
               <TextInput
+                ref={inputRef}
                 style={styles.input}
                 value={inputValue}
-                onChangeText={setInputValue}
-                placeholder="Ask anything..."
-                placeholderTextColor={colors.inputPlaceholder}
+                onChangeText={(text) => {
+                  setInputValue(text);
+                  resetIdleTimer();
+                  if (isListening && text.length > 0) {
+                    setIsListening(false);
+                    micPulse.stopAnimation();
+                    micPulse.setValue(1);
+                  }
+                }}
+                placeholder={isListening ? 'Speak now...' : 'Ask anything...'}
+                placeholderTextColor={isListening ? colors.primary : colors.inputPlaceholder}
                 multiline
                 maxLength={2000}
                 editable={!isLoading}
@@ -126,13 +285,14 @@ export default function ChatInterface() {
           </View>
         </KeyboardAvoidingView>
       ) : (
-        // Empty state
         <EmptyState
           onSendMessage={handleSendMessage}
           inputValue={inputValue}
-          setInputValue={setInputValue}
+          setInputValue={(text) => { setInputValue(text); resetIdleTimer(); }}
           isLoading={isLoading}
           onToggleSidebar={() => setSidebarVisible(true)}
+          onMicPress={handleMicPress}
+          isListening={isListening}
         />
       )}
     </View>
@@ -175,7 +335,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.inputBorder,
     borderRadius: 16,
-    paddingLeft: 16,
+    paddingLeft: 6,
     paddingRight: 6,
     paddingVertical: 6,
     minHeight: 52,
@@ -189,6 +349,17 @@ const styles = StyleSheet.create({
     paddingBottom: Platform.OS === 'ios' ? 8 : 4,
     lineHeight: 22,
   },
+  micButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 4,
+  },
+  micButtonActive: {
+    backgroundColor: '#ef4444',
+  },
   sendButton: {
     width: 36,
     height: 36,
@@ -196,9 +367,34 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    marginLeft: 8,
+    marginLeft: 4,
   },
   sendButtonDisabled: {
     backgroundColor: '#d1d5db',
+  },
+  listeningBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+  },
+  micPulseCircle: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#ef4444',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  listeningText: {
+    flex: 1,
+    fontSize: 13,
+    color: colors.textSecondary,
+  },
+  listeningStop: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#ef4444',
   },
 });
